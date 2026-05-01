@@ -35,14 +35,7 @@ knitr::opts_chunk$set(fig.align = 'center', out.width = '80%')
 
 ```{r repositorio_github, echo=FALSE}
 
-# 1. Adiciona todos os arquivos modificados/novos da pasta
-gert::git_add(".")
 
-# 2. Faz o commit (registra a versão atual na sua máquina)
-gert::git_commit("Commit inicial com dados e análises do artigo")
-
-# 3. Tenta criar e conectar com o GitHub novamente
-usethis::use_github()
 
 ```
 
@@ -57,7 +50,6 @@ pacman::p_load(
   rio,               # Importação de arquivos
   janitor,           # Limpeza de nomes
   censobr,           # API do Censo IBGE
-  psych,             # Aplicação do teste de Alpha Cronbach
 )
 
 ```
