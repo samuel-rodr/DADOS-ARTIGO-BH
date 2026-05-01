@@ -1,0 +1,365 @@
+---
+title: "data_censo"
+author: "Samuel dos Santos Rodrigues"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    fig-cap-location: top
+    fig-align: center
+    theme: cosmo
+    highlight-style: github
+    smooth-scroll: true
+    anchor-sections: true
+lang: pt-BR
+editor: visual
+---
+
+## Configuração do ambiente
+
+### Opções globais dos chunks:
+
+```{r chunck}
+
+knitr::opts_chunk$set(fig.align = 'center', out.width = '80%')
+
+```
+
+### Configurar sincronização com Github:
+
+```{r repositorio_github, echo=FALSE}
+
+# 1. Adiciona todos os arquivos modificados/novos da pasta
+gert::git_add(".")
+
+# 2. Faz o commit (registra a versão atual na sua máquina)
+gert::git_commit("Commit inicial com dados e análises do artigo")
+
+# 3. Tenta criar e conectar com o GitHub novamente
+usethis::use_github()
+
+```
+
+### Pacotes:
+
+```{r packcage, warning=FALSE, message=FALSE}
+
+if(!require(pacman)){install.packages("pacman")}
+  
+pacman::p_load(
+  tidyverse,         # Manipulação de dados e visualização
+  rio,               # Importação de arquivos
+  janitor,           # Limpeza de nomes
+  censobr,           # API do Censo IBGE
+  psych,             # Aplicação do teste de Alpha Cronbach
+)
+
+```
+
+### Banco de dados e engenharia de variáveis:
+
+```{r data, warning=FALSE, message=FALSE}
+
+data_censo <- read_tracts(
+  year = 2022, 
+  dataset = "Basico", # planilha
+  showProgress = TRUE
+)
+
+# Baixar dicionário:
+#data_dictionary(year = 2022, dataset = "tracts")
+
+# Relação de bairros populares e suas respectivas regionais:
+
+dadosBH_bairro_regional <- import("01. DADOS/bairros_regionais_bh.xlsx")
+
+```
+
+
+```{r filter_1, warning=FALSE, message=FALSE}
+
+# filtrar para Belo Horizonte:
+
+dados_BH <- data_censo %>%
+  filter(code_muni == 3106200) %>% 
+  collect()
+
+
+dados_BH_2 <- dados_BH %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    populacao_total = sum(V0001, na.rm = TRUE)
+  ) %>% 
+  mutate(regional = str_to_upper(regional))
+  
+
+```
+
+
+## Saúde:
+
+### Data:
+
+```{r filter_saude, warning=FALSE, message=FALSE}
+
+# Fi de quem? 👪:
+
+# Import:
+
+dadosBH_pop_regional_2022 <- import("01. DADOS/pop_regional_2022.csv")
+dadosBH_cadunico_2022 <- import("01. DADOS/pop_cadunico_2022.csv")
+
+# Variáveis de interesse saúde:
+  
+dadosBH_cadunico_2022 <- dadosBH_cadunico_2022 %>%
+  clean_names() %>% 
+  select(
+    idade,
+    faixa_renda_familiar_per_capita,
+    regional
+  )
+
+dadosBH_contador_caudnico_2022 <- dadosBH_cadunico_2022 %>% 
+  count(regional) %>% 
+  filter(
+    regional != "ENDERECO NAO GEORREFERENCIADO",
+    regional != "Endereco FORA Region"
+  ) %>%
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
+  rename(
+    pop_focal = "n"
+  )
+
+#----------------------------------------------------------------------------------------------------#
+
+# Tijolinho 🧱:
+
+dadosBH_centro_saude <- import("01. DADOS/centro_saude_bh.csv") %>% 
+  clean_names() %>% 
+  mutate(
+    nome_bairro_popular = str_to_upper(nome_bairro_popular),
+    nome_bairro_popular = ifelse(nome_bairro_popular == "VILA SÃO TOMÁZ", "SÃO TOMÁZ", nome_bairro_popular)
+  )
+
+# Banco de dados original não contém relação dos CS com as regionais:
+
+dadosBH_centro_saude <-  dadosBH_centro_saude %>% 
+  left_join(dadosBH_bairro_regional, by = "nome_bairro_popular")
+
+dadosBH_contagem_cs <- dadosBH_centro_saude %>%
+  count(regional, sort = TRUE) %>% 
+  rename(
+    n_centro_saude = "n"
+  )
+
+#----------------------------------------------------------------------------------------------------#
+
+# Cabecinha 👨:
+
+dadosBH_equipe_saude <- import("01. DADOS/equipe_saude_2022.csv") %>% 
+  clean_names() %>% 
+  filter(co_municipio == 310620) %>%
+  rename("regional" = "ds_segmento_esf") %>% 
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
+  filter(
+    tp_equipe_esf %in% c(1, 70)
+  )
+
+
+dadosBH_contagem_equipe <- dadosBH_equipe_saude %>%
+  count(regional, sort = TRUE) %>% 
+  rename(
+    n_equipes_saude = "n"
+  )
+
+#----------------------------------------------------------------------------------------------------#
+
+# Banco de dados principal saúde 📊:
+
+dadosBH_saude <- dadosBH_pop_regional_2022 %>% 
+  clean_names() %>%
+  select(-fid, - id_pop_domic_regional_2022, - geometria) %>% 
+  rename(
+    regional = "nome",
+    sigla_regional = "sigla",
+    pop_pbh = "populacao",
+    domicilios_saude = "domicilios"
+  ) %>% 
+  left_join(dados_BH_2, by = "regional") %>% 
+  rename(
+    pop_saude = "populacao_total"
+  ) %>% 
+  mutate(across(c(pop_saude, domicilios_saude, densidade_demografica, area_km, cod_regional), as.numeric))
+
+# Join população focal:
+
+dadosBH_saude <- dadosBH_saude %>% 
+  left_join(dadosBH_contador_caudnico_2022, by = "regional")
+
+# Join quantidade de centros de saúde:
+
+dadosBH_saude <- dadosBH_saude %>% 
+  left_join(dadosBH_contagem_cs, by = "regional")
+
+# Join equipes de saúde:
+
+dadosBH_saude <- dadosBH_saude %>% 
+  left_join(dadosBH_contagem_equipe, by = "regional")
+
+#glimpse(dadosBH_saude)
+
+```
+
+### Índice saúde:
+
+```{r indice_saude, warning=FALSE, message=FALSE}
+
+# Engenharia do indicador:
+
+# Motor matemático:
+
+motor_eng <- function(a, b) {
+  ifelse(b == 0 | a == 0, NA, a / b)
+}
+
+# Aplicação:
+
+dadosBH_indicadores_saude <- dadosBH_saude %>%
+  mutate(
+    ind_cs_area = motor_eng(area_km, n_centro_saude),
+    ind_eq_area = motor_eng(area_km, n_equipes_saude),
+    ind_pop_cs = motor_eng(pop_saude, n_centro_saude),
+    ind_pop_eq = motor_eng(pop_saude, n_equipes_saude),
+    ind_foc_cs = motor_eng(pop_focal, n_centro_saude),
+    ind_foc_eq = motor_eng(pop_focal, n_equipes_saude)
+  )
+
+```
+
+```{r indice_testes, warning=FALSE, message=FALSE}
+
+# Teste de consistência interna:
+
+# Matriz para testes:
+
+matriz_indicadores_saude <- dadosBH_indicadores_saude %>%
+  select(ind_cs_area,ind_eq_area, ind_pop_cs, ind_pop_eq, ind_foc_cs, ind_foc_eq)
+
+# Matriz de correlação de Pearson:
+
+cor_matriz_saude <- cor(matriz_indicadores_saude, use = "complete.obs")
+print("Matriz de Correlação:")
+print(round(cor_matriz_saude, 2))
+
+# 1. Preparação da matriz (Apenas os indicadores brutos, sem NAs)
+matriz_pca <- dadosBH_indicadores_saude %>%
+  select(ind_cs_area, ind_eq_area, ind_pop_cs, ind_pop_eq, ind_foc_cs, ind_foc_eq) %>%
+  na.omit() # O PCA não aceita NAs
+
+# 2. Execução do PCA
+# scale. = TRUE é vital pois as escalas de KM² e População são muito diferentes
+pca_saude <- prcomp(matriz_pca, center = TRUE, scale. = TRUE)
+
+# 3. Visualizando a importância (Check de validade)
+summary(pca_saude) # O PC1 deve explicar idealmente > 60% da variância
+
+# 4. Extração do Índice e Normalização
+# O PC1 geralmente vem com sinais invertidos, multiplicamos por -1 se necessário
+# para que "maior valor" signifique "maior capacidade"
+dadosBH_pca_final <- dadosBH_indicadores_saude %>%
+  na.omit() %>%
+  mutate(
+    # Extraindo o primeiro componente principal
+    i_CEI_PCA_bruto = pca_saude$x[,1] * -1, 
+    
+    # Normalizando para escala 0 a 1 (para facilitar leitura)
+    i_CEI_S_PCA = scales::rescale(i_CEI_PCA_bruto, to = c(0, 1))
+  ) %>%
+  arrange(desc(i_CEI_S_PCA)) %>%
+  mutate(Posicao_PCA = row_number())
+
+# 5. Verificando os Pesos (Loadings)
+# Isso mostra o quanto cada variável contribuiu para o índice
+print("Cargas do PCA (Loadings):")
+print(pca_saude$rotation[,1])
+
+# Visualizando as 5 regionais com maior capacidade pelo PCA
+dadosBH_pca_final %>%
+  select(regional, i_CEI_S_PCA, Posicao_PCA) %>%
+  head(5)
+
+# Visualizando as cargas de forma gráfica (ajuda muito na dissertação)
+barplot(pca_saude$rotation[,1], 
+        main = "Pesos das Variáveis no Índice (PC1)", 
+        col = "steelblue", las = 2)
+
+```
+
+```{r}
+
+# 4. Normalização e Construção do Índice i_CEI_S (Versão Completa)
+dadosBH_icei_saude <- dadosBH_indicadores_saude %>%
+  mutate(
+    # REESCALE INVERTIDO: Maior valor (sobrecarga/distância) = 0 | Menor valor (eficiência) = 1
+    # Variáveis de População (Pessoas por equipamento)
+    norm_pop_cs  = scales::rescale(ind_pop_cs, to = c(1, 0)),
+    norm_pop_eq  = scales::rescale(ind_pop_eq, to = c(1, 0)),
+    norm_foc_cs  = scales::rescale(ind_foc_cs, to = c(1, 0)),
+    norm_foc_eq  = scales::rescale(ind_foc_eq, to = c(1, 0)),
+    
+    # Variáveis de Área (Km² por equipamento - mede dispersão geográfica)
+    norm_cs_area = scales::rescale(ind_cs_area, to = c(1, 0)),
+    norm_eq_area = scales::rescale(ind_eq_area, to = c(1, 0))
+  ) %>%
+  mutate(
+    # 2. Composição do Índice de Capacidade (Sugestão de Pesos)
+    # Distribuindo os pesos para incluir a dimensão territorial (área)
+    i_CEI_S = (norm_pop_cs + norm_pop_eq + norm_foc_cs + 
+               norm_foc_eq + norm_cs_area + norm_eq_area) / 6
+  ) %>%
+  arrange(desc(i_CEI_S)) %>%
+  mutate(Posicao_Capacidade = row_number())
+
+# 5. Tabela Final para Exportação (Incluindo as variáveis de área)
+tabela_final_saude <- dadosBH_icei_saude %>%
+  select(
+    Posicao_Capacidade, 
+    regional, 
+    # Brutos
+    ind_pop_cs, ind_pop_eq, ind_foc_cs, ind_foc_eq, ind_cs_area, ind_eq_area,
+    # Notas
+    norm_pop_cs, norm_pop_eq, norm_foc_cs, norm_foc_eq, norm_cs_area, norm_eq_area,
+    # Índice
+    i_CEI_S
+  ) %>%
+  mutate(
+    # Arredondando Brutos: População para inteiros, Área para 2 casas
+    across(c(ind_pop_cs, ind_pop_eq, ind_foc_cs, ind_foc_eq), ~round(.x, 0)),
+    across(c(ind_cs_area, ind_eq_area), ~round(.x, 2)),
+    # Arredondando Notas e Índice
+    across(c(starts_with("norm_"), i_CEI_S), ~round(.x, 3))
+  )
+
+# Visualização
+print(tabela_final_saude)
+
+
+```
+
+
+
+
+
+
+`
+
+
+
+
