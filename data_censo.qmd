@@ -41,7 +41,9 @@ pacman::p_load(
   tidyverse,         # Manipulação de dados e visualização
   rio,               # Importação de arquivos
   janitor,           # Limpeza de nomes
-  censobr            # API do Censo IBGE
+  censobr,          # API do Censo IBGE
+  sf,                # Manipulação de dados geográficos
+  viridis            # Paletas de cores estéticas
 )
 
 ```
@@ -259,8 +261,8 @@ motor_eng <- function(a, b) {
 dadosBH_indicadores_saude <- dadosBH_saude %>%
   mutate(
     ind_alv_prof = motor_eng(populacao_alvo, n_profissionais_saude),
-    ind_cs_area = motor_eng(area_km, n_centro_saude),
-    ind_pop_prof = motor_eng(populacao_censo, n_profissionais_saude)
+    ind_pop_prof = motor_eng(populacao_censo, n_profissionais_saude),
+    ind_pob_prof = motor_eng(populacao_dif3, n_profissionais_saude) * 100
   )
 
 ```
@@ -270,8 +272,8 @@ dadosBH_indicadores_saude <- dadosBH_saude %>%
 dadosBH_indicadores_saude <- dadosBH_indicadores_saude %>%
   mutate(
     z_alv_prof = scale(ind_alv_prof)[,1],
-    z_cs_area  = scale(ind_cs_area)[,1],
-    z_pop_prof = scale(ind_pop_prof)[,1]
+    z_pop_prof = scale(ind_pop_prof)[,1],
+    z_pob_prof = scale(ind_pob_prof)[,1]
   )
 
 ```
@@ -282,7 +284,7 @@ dadosBH_indicadores_saude <- dadosBH_indicadores_saude %>%
 # Gerar matriz para teste de correlação de pearson:
 
 matriz_indicadores_saude <- dadosBH_indicadores_saude %>%
-  select(ind_alv_prof, ind_cs_area, ind_pop_prof)
+  select(ind_alv_prof, ind_pop_prof, ind_pob_prof)
 
 cor_matriz_saude <- cor(matriz_indicadores_saude, use = "complete.obs")
 print("Matriz de Correlação:")
@@ -306,34 +308,127 @@ print(pca_saude$rotation[,1])
 # Extração do PCA e Normalização (0-1):
 
 pesos_pca <- pca_saude$rotation[,1]^2
+
 peso_alv <- pesos_pca["ind_alv_prof"]
-peso_cs  <- pesos_pca["ind_cs_area"]
 peso_pop <- pesos_pca["ind_pop_prof"]
+peso_pob <- pesos_pca["ind_pob_prof"]
 
 
 dadosBH_pca_final <- dadosBH_indicadores_saude %>%
-  na.omit() %>%
   mutate(
-    norm_alv_prof = (max(ind_alv_prof) - ind_alv_prof) / (max(ind_alv_prof) - min(ind_alv_prof)),
-    norm_cs_area  = (max(ind_cs_area) - ind_cs_area) / (max(ind_cs_area) - min(ind_cs_area)),
-    norm_pop_prof = (max(ind_pop_prof) - ind_pop_prof) / (max(ind_pop_prof) - min(ind_pop_prof)),
+    norm_alv_prof = scales::rescale(ind_alv_prof, to = c(0, 1)),
+    norm_pop_prof = scales::rescale(ind_pop_prof, to = c(0, 1)),
+    norm_pob_prof = scales::rescale(ind_pob_prof, to = c(0, 1)),
     i_CEI_S = (norm_alv_prof * peso_alv) + 
-              (norm_cs_area * peso_cs) + 
-              (norm_pop_prof * peso_pop)
-  ) %>%
+              (norm_pop_prof * peso_pop) + 
+              (norm_pob_prof * peso_pob)
+    ) %>%
   arrange(desc(i_CEI_S)) %>%
   mutate(Posicao_PCA = row_number())
 
 ```
 
+```{r indice_final_2, warning=FALSE, message=FALSE}
+
+dadosBH_indice_simples <- dadosBH_indicadores_saude %>%
+  na.omit() %>%
+  mutate(
+    norm_alv_prof_2 = scales::rescale(ind_alv_prof, to = c(0, 1)),
+    norm_pop_prof_2 = scales::rescale(ind_pop_prof, to = c(0, 1)),
+    norm_pob_prof_2 = scales::rescale(ind_pob_prof, to = c(0, 1)),
+    i_CEI_S_bruto = (norm_alv_prof_2 + norm_pop_prof_2 + norm_pob_prof_2) / 3,
+  ) %>%
+  arrange(desc(i_CEI_S_bruto)) %>%
+  mutate(Posicao_Ranking = row_number())
+
+```
+
+```{r graficos_saude_1, warning=FALSE, message=FALSE}
+
+# Ajuste do banco de dados para as geomlines
+
+mapa_pca_sf <- import("01. DADOS/regionais_bh.csv") %>%
+  clean_names() %>%
+  st_as_sf(wkt = "geometria", crs = 31983) %>% 
+  mutate(
+    regional = str_to_upper(nome),
+    regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")
+  ) %>%
+  group_by(regional) %>%
+  summarize(geometria = st_union(geometria)) %>%
+  st_make_valid() %>%
+  left_join(dadosBH_pca_final, by = "regional")
+
+# Ajuste dos geompoints
+
+dadosBH_centro_saude_geo <- dadosBH_centro_saude %>%
+  filter(!is.na(geometria), geometria != "", geometria != "NA") %>% 
+  st_as_sf(wkt = "geometria", crs = 31983) %>% 
+  filter(!st_is_empty(.))
+
+```
+
+```{r graficos_saude_2, warning=FALSE, message=FALSE}
+
+# Mapa
+
+mapa_plot_saude <-ggplot() +
+  # Polígonos das regionais
+  geom_sf(data = mapa_pca_sf, aes(fill = i_CEI_S), color = "gray", linewidth = 0.6) +
+  # Pontos dos centros de saúde
+  geom_sf(data = dadosBH_centro_saude_geo, color = "black", size = 1.2) +
+  # Nomes das regionais
+  geom_sf_text(data = mapa_pca_sf, aes(label = regional), 
+               color = "black", size = 3, fontface = "bold", check_overlap = TRUE) +
+  coord_sf(datum = NA) +
+  scale_fill_gradient(
+    low = "#e5f5e0", 
+    high = "#06402b",
+    name = "i-CEIS",
+    na.value = "grey90"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "black")
+  )
+
+# Salvar
+
+ggsave(filename = "03. OUTPUTS/map_iceis.png", 
+       plot = mapa_plot_saude, 
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+```
+
+```{r graficos_saude_3, warning=FALSE, message=FALSE}
+
+graf_plot_saude <- ggplot(dadosBH_pca_final, aes(x = i_CEI_S, y = reorder(regional, i_CEI_S))) +
+  geom_col(aes(fill = i_CEI_S), show.legend = FALSE) +
+  geom_text(aes(label = round(i_CEI_S, 2)), hjust = -0.2, size = 4, fontface = "bold") +
+  scale_fill_gradient(low = "#e5f5e0", high = "#06402b") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_minimal() +
+  labs(
+    x = "i-CEIS",
+    y = NULL
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.y = element_text(face = "bold", size = 10),
+    panel.grid.major.y = element_blank()
+  )
+
+# Salvar
+
+ggsave(filename = "03. OUTPUTS/graf_iceis.png", 
+       plot = graf_plot_saude, 
+       width = 8, height = 5, dpi = 300, bg = "white")
+
+```
 
 
-
-
-
-
-
-`
 
 
 
