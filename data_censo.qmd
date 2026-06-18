@@ -41,9 +41,13 @@ pacman::p_load(
   tidyverse,         # Manipulação de dados e visualização
   rio,               # Importação de arquivos
   janitor,           # Limpeza de nomes
-  censobr,          # API do Censo IBGE
+  censobr,           # API do Censo IBGE
   sf,                # Manipulação de dados geográficos
-  viridis            # Paletas de cores estéticas
+  viridis,           # Paletas de cores estéticas
+  geobr,             # Pacote para mapas
+  ggrepel,           # Pacote para visualização gráfica
+  ggplot2,           # Pacote de montagem de gráficos
+  COINr              # Pacote para aplicação do modelo em coin
 )
 
 ```
@@ -58,6 +62,24 @@ data_censo <- read_tracts(
   showProgress = TRUE
 )
 
+# Definir as características da população:
+
+data_censo_2 <- read_tracts(
+  year = 2022, 
+  dataset = "Pessoas", # planilha
+  showProgress = TRUE
+)
+
+data_censo_3 <- read_tracts(
+  year = 2022, 
+  dataset = "Domicilio", # planilha
+  showProgress = TRUE
+)
+
+dados_BH_5 <- data_censo_3 %>%
+  filter(code_muni == 3106200) %>% 
+  collect()
+
 # Baixar dicionário:
 
 # data_dictionary(year = 2022, dataset = "tracts")
@@ -66,29 +88,42 @@ data_censo <- read_tracts(
 
 dadosBH_bairro_regional <- import("01. DADOS/bairros_regionais_bh.xlsx")
 
-```
+# Função para limpar textos para join:
 
+limpar_texto <- function(x) {
+  x %>%
+    iconv(to = "ASCII//TRANSLIT") %>% # remove acentos;
+    str_to_upper()                    # transforma em maiúsculas;
+}
+
+#Relação de bairros populares limpas:
+
+dadosBH_bairro_regional_clean <- dadosBH_bairro_regional %>%
+  clean_names() %>%
+  mutate(across(everything(), limpar_texto))
+  
+
+export(dadosBH_bairro_regional_clean, "01. DADOS/bairros_regionais_bh_clean.xlsx")
+
+```
 
 ```{r filter_1, warning=FALSE, message=FALSE}
 
-# filtrar para Belo Horizonte:
+# dados populacionais do censo:
 
 dados_BH <- data_censo %>%
   filter(code_muni == 3106200) %>% 
   collect()
 
-
-dados_BH_2 <- dados_BH %>%
+dados_BH_pop <- dados_BH %>%
   group_by(regional = name_subdistrict) %>%
   summarise(
     quantidade_setores = n(), 
     populacao_censo = sum(V0001, na.rm = TRUE)
   ) %>% 
   mutate(regional = str_to_upper(regional))
-  
 
 ```
-
 
 ## Saúde:
 
@@ -96,31 +131,41 @@ dados_BH_2 <- dados_BH %>%
 
 ```{r filter_saude, warning=FALSE, message=FALSE}
 
-# Fi de quem? 👪:
+# Dados: IPDRA
 
-# Import:
+# Filtro etário do censo:
 
-dadosBH_pop_regional_2022 <- import("01. DADOS/pop_regional_2022.csv") %>% 
-  clean_names()
-dadosBH_cadunico_2022 <- import("01. DADOS/pop_cadunico_2022_clean.csv")
+dados_BH_2 <- data_censo_2 %>%
+  filter(code_muni == 3106200) %>% 
+  collect()
 
-# Join para compor o banco de dados da população:
+# Crianças:
 
-dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>%
-  left_join(dados_BH_2, by = c("nome" = "regional"))%>% 
-  rename(
-    populacao_bhgeo = "populacao"
-  )
-
-# Ajuste de banco de dados:
-
-dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>% 
-  mutate(
-    populacao_dif = populacao_censo - populacao_bhgeo
+dados_BH_3 <- dados_BH_2 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    crianca_censo = sum(demografia_V01031, demografia_V01032, na.rm = TRUE)
   ) %>% 
-  rename(
-    regional = "nome"
-  )
+  mutate(regional = str_to_upper(regional))%>% 
+  select(regional, crianca_censo)
+
+# Idosos:
+
+dados_BH_4 <- dados_BH_2 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    idoso60_censo = sum(demografia_V01040, na.rm = TRUE),
+    idoso70_censo = sum(demografia_V01041, na.rm = TRUE),
+    idoso_censo = idoso60_censo + idoso70_censo
+  ) %>% 
+  mutate(regional = str_to_upper(regional)) %>% 
+  select(regional, idoso_censo)
+
+# Pessoas incritas no CadUnico (até 3SM):
+
+dadosBH_cadunico_2022 <- import("01. DADOS/pop_cadunico_2022_clean.csv")
 
 dadosBH_contador_caudnico_2022 <- dadosBH_cadunico_2022 %>% 
   count(regional) %>% 
@@ -130,10 +175,36 @@ dadosBH_contador_caudnico_2022 <- dadosBH_cadunico_2022 %>%
   ) %>%
   mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
   rename(
-    populacao_alvo = "n"
+    populacao_renda_cadunico = "n"
   )
 
-# Construção do banco completo:
+#------------------------------------------------------------------------------------------------------#
+
+
+# Compor dados da população e comparações:
+
+dadosBH_pop_regional_2022 <- import("01. DADOS/pop_regional_2022.csv") %>% 
+  clean_names()
+
+# Join para compor o banco de dados da população:
+
+dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>%
+  left_join(dados_BH_pop, by = c("nome" = "regional"))%>% 
+  rename(
+    populacao_bhgeo = "populacao"
+  )
+
+# Ajuste de banco de dados (compreender a diferença entre a população do censo e a do BHmap):
+
+dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>% 
+  mutate(
+    populacao_dif = populacao_censo - populacao_bhgeo
+  ) %>% 
+  rename(
+    regional = "nome"
+  )
+
+# Construção do banco completo adição (CadÚnico):
 
 dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>% 
   left_join(dadosBH_contador_caudnico_2022, by = "regional")
@@ -142,19 +213,44 @@ dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>%
 
 dadosBH_pop_regional_2022 <-  dadosBH_pop_regional_2022 %>% 
   mutate(
-    populacao_dif2 = populacao_censo - populacao_alvo,
-    populacao_dif3 = populacao_alvo / populacao_censo
+    populacao_dif2 = populacao_censo - populacao_renda_cadunico, # pessoas que não estão no CadUnico
+    populacao_dif3 = populacao_renda_cadunico / populacao_censo # taxa de pobreza
+  )
+
+# Adicionar os fatores de pressão que compõe o iPDRA:
+
+# Adicionar crianças:
+
+dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>% 
+  left_join(dados_BH_3, by = "regional")
+
+# Adicionar os idosos:
+
+dadosBH_pop_regional_2022 <- dadosBH_pop_regional_2022 %>% 
+  left_join(dados_BH_4, by = "regional")
+
+
+# Análise das taxas de pressão:
+
+dadosBH_pop_regional_2022 <-  dadosBH_pop_regional_2022 %>% 
+  mutate(
+    populacao_dif4 = crianca_censo / populacao_censo, # taxa de idosos;
+    populacao_dif5 = idoso_censo / populacao_censo # taxa de criança;
   )
 
 #----------------------------------------------------------------------------------------------------#
 
-# Tijolinho 🧱:
+# Composição do iPTIR:
+# Composição dos Centros de Saúde por regional:
 
-dadosBH_centro_saude <- import("01. DADOS/centro_saude_bh.csv") %>% 
+dadosBH_centro_saude <- import("01. DADOS/centro_saude_bh_2022.csv") %>% 
   clean_names() %>% 
+  filter(sigla_categoria == "CS") %>% 
   mutate(
     nome_bairro_popular = str_to_upper(nome_bairro_popular),
-    nome_bairro_popular = ifelse(nome_bairro_popular == "VILA SÃO TOMÁZ", "SÃO TOMÁZ", nome_bairro_popular)
+    nome_bairro_popular = ifelse(nome_bairro_popular == "VILA SÃO TOMÁZ", "SÃO TOMÁZ", nome_bairro_popular),
+    nome_bairro_popular = ifelse(nome_bairro_popular == "SAO PAULO", "SÃO PAULO", nome_bairro_popular),
+    nome_bairro_popular = ifelse(nome_bairro_popular == "CINQÜENTENÁRIO", "CINQUENTENÁRIO", nome_bairro_popular)
   )
 
 # Banco de dados original não contém relação dos CS com as regionais:
@@ -168,79 +264,164 @@ dadosBH_contagem_cs <- dadosBH_centro_saude %>%
     n_centro_saude = "n"
   )
 
+# Vazios demográficos:
+
+dadosBH_setores_censitarios <- import("01. DADOS/setores_censitarios_BH_2022.csv") %>% 
+  clean_names() %>% 
+  rename(cd_setor = "cod_setor") %>% 
+  mutate(cd_setor = as.character(cd_setor))
+
+dadosBH_setores_censo <- import("01. DADOS/densidade_demografica_liquida.xlsx") %>% 
+  clean_names() %>% 
+  mutate(cd_setor = as.character(cd_setor))
+
+# join para extrair os setores de BH:
+
+dadosBH_setores_censitarios <- dadosBH_setores_censitarios %>% 
+  left_join(dadosBH_setores_censo, by = "cd_setor")
+
+dadosBH_setores_censitarios <- dadosBH_setores_censitarios %>%
+  mutate(nome_subdistrito = case_when(
+    nome_subdistrito == "Centro-Sul/Hipercentro" ~ "Centro-Sul",
+    nome_subdistrito == "Hipercentro" ~ "Centro-Sul",
+    TRUE ~ nome_subdistrito
+  )) %>% 
+  mutate(nome_subdistrito = toupper(nome_subdistrito))
+
+# Agrupando por Regional e calculando a densidade líquida:
+
+dadosBH_densidade_por_regional <- dadosBH_setores_censitarios %>%
+  group_by(nome_subdistrito) %>% 
+    summarize(
+    area_domiciliada_total = sum(area_domiciliada_km2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  rename(regional = nome_subdistrito)
+
+
 #----------------------------------------------------------------------------------------------------#
 
-# Cabecinha 👨:
+# Composição do iPTIR:
 
-# Equipes totais :
+# Equipes totais cnes:
 
 dadosBH_equipe_saude_total <- import("01. DADOS/equipes_saude_total_2022.csv") %>% 
   clean_names() %>%
-  filter(co_municipio == 310620)
-
-# Profissionais totais de Belo Horizonte:
-
-dadosBH_profissionais_equipes_total <- import("01. DADOS/profissionais_equipesBH_2022.csv") %>% 
-  select(
-    seq_equipe, co_profissional_sus, co_unidade, co_cbo
-  )
-
-# Equipe NASF:
-  
-dadosBH_equipe_saude <- import("01. DADOS/equipe_saude_2022.csv") %>% 
-  clean_names() %>% 
   filter(co_municipio == 310620) %>%
-  rename("regional" = "ds_segmento_esf") %>% 
-  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL"))
+  select(-co_unidade) %>% 
+  distinct(seq_equipe, .keep_all = TRUE) # retirar duplicidade das equipes
 
+# Codigo das equipes:
 
-# Join para selecionar apenas profissionais NASF:
+tipo_equipe_cnes <- import("01. DADOS/tipo_equipes_cnes_2022.csv") %>% 
+  clean_names()
 
-dadosBH_profissionais_equipe_nasf <- dadosBH_equipe_saude %>% 
-  inner_join(dadosBH_profissionais_equipes_total, by = "seq_equipe") %>% 
-  distinct(co_profissional_sus, seq_equipe, .keep_all = TRUE)
+# Profissionais de saude cnes:
 
-dadosBH_profissionais_equipe_nasf <- dadosBH_profissionais_equipe_nasf %>% 
-  select(
-    co_municipio, regional, ds_area_esf, seq_equipe, seq_equipe_esf, co_unidade = "co_unidade.x", tp_equipe_esf, co_cnes_esf, no_fantasia_esf, co_profissional_sus, co_cbo
-  )
+dadosBH_profissionais_saude_total <- import("01. DADOS/profissionais_saude_cnes_2022.csv") %>% 
+  clean_names() %>%
+  filter(co_municipio == 310620) %>% 
+  distinct(co_profissional_sus, .keep_all = TRUE) # retirar duplicidades dos profissionais
 
-# Contador das equipes:
+# Estabelecimentos cnes 2022:
 
-dadosBH_contagem_equipe <- dadosBH_profissionais_equipe_nasf %>%
+dadosBH_estabelecimentos_saude <- import("01. DADOS/estabelecimentos_saude_cnes_2022.csv") %>% 
+  clean_names() %>% 
+  mutate(co_unidade = as.character(co_unidade))
+
+# Join da relação profissionais e equipes:
+
+# Join profissionais x equipes:
+
+dadosBH_profissionais_equipes_2022 <- dadosBH_profissionais_saude_total %>% 
+  left_join(dadosBH_equipe_saude_total, by = "seq_equipe") %>% 
+  mutate(co_unidade = as.character(co_unidade))
+
+# Join profissionais x estabelecimentos:
+
+dadosBH_profissionais_equipes_2022 <- dadosBH_profissionais_equipes_2022 %>% 
+  left_join(dadosBH_estabelecimentos_saude, by = "co_unidade")
+
+# Ajuste de nome de variável:
+
+dadosBH_profissionais_equipes_2022 <- dadosBH_profissionais_equipes_2022 %>% 
+  rename(nome_bairro_popular = no_bairro)
+
+# Ajuste de nomes incompletos no banco de dados cnes:
+
+dadosBH_profissionais_equipes_2022 <- dadosBH_profissionais_equipes_2022 %>%
+  mutate(nome_bairro_popular = case_when(
+  nome_bairro_popular == "FLAVIO MARQUES LISBO"         ~ "FLAVIO MARQUES LISBOA",
+    nome_bairro_popular == "CONJUNTO TUNEL DE IB"       ~ "TUNEL DE IBIRITE",
+    nome_bairro_popular == "DAS INDUSTRIAS"             ~ "BAIRRO DAS INDUSTRIAS I",
+    nome_bairro_popular == "CONJUNTO RIBEIRO DE"        ~ "RIBEIRO DE ABREU",
+    nome_bairro_popular == "CABANA"                     ~ "CABANA DO PAI TOMAS",
+    nome_bairro_popular == "JARDIM DOS COMERCIAR"       ~ "JARDIM DOS COMERCIARIOS",
+    nome_bairro_popular == "MINAS CAIXA"                ~ "MINASCAIXA",
+    nome_bairro_popular == "JARDIM EUROPA"              ~ "EUROPA",
+    nome_bairro_popular == "CONJUNTO JARDIM FILA"       ~ "CONJUNTO JARDIM FILADELFIA",
+    nome_bairro_popular == "CONJUNTO CELSO MACHA"       ~ "CONJUNTO CELSO MACHADO",
+    nome_bairro_popular == "TUPI"                       ~ "TUPI B",
+    nome_bairro_popular == "CONJUNTO CALIFORNIA"        ~ "CALIFORNIA",
+    nome_bairro_popular == "LINDEI"                     ~ "LINDEIA",
+    TRUE ~ nome_bairro_popular
+  ))
+
+# Join profissionais x bairros(regionais):
+
+dadosBH_profissionais_equipes_2022 <- dadosBH_profissionais_equipes_2022 %>% 
+  left_join(dadosBH_bairro_regional_clean, by = "nome_bairro_popular")
+
+dadosBH_profissionais_equipes_2022_count <- dadosBH_profissionais_equipes_2022 %>%
   count(regional, sort = TRUE) %>% 
   rename(
-    n_profissionais_saude = "n"
+    profissionais_bh = "n"
   )
 
-#----------------------------------------------------------------------------------------------------#
+# Composição do nº de profissionais da equipe de Saúde da Família:
 
-# Banco de dados principal saúde 📊:
+dadosBH_equipe_saude_esf <- dadosBH_profissionais_equipes_2022 %>% 
+  filter(tp_equipe %in% c("70","71"))
 
-dadosBH_saude <- dadosBH_pop_regional_2022 %>% 
-  clean_names() %>%
-  select(-fid, - id_pop_domic_regional_2022, - geometria) %>% 
-  left_join(dados_BH_2, by = "regional")
+# Contador dos profissionais da ESF:
 
-# Join quantidade de centros de saúde:
+dadosBH_equipe_saude_esf_count <- dadosBH_equipe_saude_esf %>%
+  count(regional, sort = TRUE) %>% 
+  rename(
+    profissionais_esf = "n"
+  )
 
-dadosBH_saude <- dadosBH_saude %>% 
-  left_join(dadosBH_contagem_cs, by = "regional")
+# Join para compor o banco de dados principal:
 
-# Join equipes de saúde:
+dadosBH_saude <- dadosBH_pop_regional_2022 %>%
+  left_join(dadosBH_equipe_saude_esf_count, by = "regional")
 
-dadosBH_saude <- dadosBH_saude %>% 
-  left_join(dadosBH_contagem_equipe, by = "regional")
-
-# Ajuste de variáveis duplicadas:
+# Agregar informação ao banco de dados principal
 
 dadosBH_saude <- dadosBH_saude %>%
-  select(-quantidade_setores.y, -populacao_censo.y,
-         quantidade_setores = "quantidade_setores.x",
-         populacao_censo = "populacao_censo.x")
-  
+  left_join(dadosBH_contagem_cs, by = "regional")
 
-#glimpse(dadosBH_saude)
+# Equipe NASF:
+
+dadosBH_equipe_saude_nasf <- dadosBH_profissionais_equipes_2022 %>% 
+  filter(tp_equipe %in% c("72"))
+
+dadosBH_contagem_equipe_nasf <- dadosBH_equipe_saude_nasf %>%
+  count(regional, sort = TRUE) %>% 
+  rename(
+    profissionais_nasf = "n"
+  )
+
+# Compor banco principal:
+
+dadosBH_saude <- dadosBH_saude %>%
+  left_join(dadosBH_contagem_equipe_nasf, by = "regional")
+
+# Join das densidades liquidas:
+
+dadosBH_saude <- dadosBH_saude %>% 
+  left_join(dadosBH_densidade_por_regional, by = "regional")
+
 
 ```
 
@@ -248,188 +429,1268 @@ dadosBH_saude <- dadosBH_saude %>%
 
 ```{r indice_saude, warning=FALSE, message=FALSE}
 
-# Engenharia do indicador:
+# ==============================================================================
+# Passo 1 - Índice de Pressão Demográfica e Assistencial (IPDRA):
+# ==============================================================================
 
-# Motor matemático:
-
-motor_eng <- function(a, b) {
-  ifelse(b == 0 | a == 0, NA, a / b)
-}
-
-# Aplicação:
-
-dadosBH_indicadores_saude <- dadosBH_saude %>%
+dados_IPDRA <- dadosBH_saude %>%
   mutate(
-    ind_alv_prof = motor_eng(populacao_alvo, n_profissionais_saude),
-    ind_pop_prof = motor_eng(populacao_censo, n_profissionais_saude),
-    ind_pob_prof = motor_eng(populacao_dif3, n_profissionais_saude) * 100
-  )
-
-```
-
-```{r padronizacao, warning=FALSE, message=FALSE}
-
-dadosBH_indicadores_saude <- dadosBH_indicadores_saude %>%
-  mutate(
-    z_alv_prof = scale(ind_alv_prof)[,1],
-    z_pop_prof = scale(ind_pop_prof)[,1],
-    z_pob_prof = scale(ind_pob_prof)[,1]
-  )
-
-```
-
-
-```{r indice_testes, warning=FALSE, message=FALSE}
-
-# Gerar matriz para teste de correlação de pearson:
-
-matriz_indicadores_saude <- dadosBH_indicadores_saude %>%
-  select(ind_alv_prof, ind_pop_prof, ind_pob_prof)
-
-cor_matriz_saude <- cor(matriz_indicadores_saude, use = "complete.obs")
-print("Matriz de Correlação:")
-print(round(cor_matriz_saude, 2))
-
-
-# Aplicação do PCA para ponderar as variáveis:
-
-pca_saude <- prcomp(matriz_indicadores_saude, center = TRUE, scale. = TRUE)
-summary(pca_saude)
-
-# Visualizar os pesos:
-
-print("Pesos das variáveis no PC1:")
-print(pca_saude$rotation[,1])
-
-```
-
-```{r indice_final, warning=FALSE, message=FALSE}
-
-# Extração do PCA e Normalização (0-1):
-
-pesos_pca <- pca_saude$rotation[,1]^2
-
-peso_alv <- pesos_pca["ind_alv_prof"]
-peso_pop <- pesos_pca["ind_pop_prof"]
-peso_pob <- pesos_pca["ind_pob_prof"]
-
-
-dadosBH_pca_final <- dadosBH_indicadores_saude %>%
-  mutate(
-    norm_alv_prof = scales::rescale(ind_alv_prof, to = c(0, 1)),
-    norm_pop_prof = scales::rescale(ind_pop_prof, to = c(0, 1)),
-    norm_pob_prof = scales::rescale(ind_pob_prof, to = c(0, 1)),
-    i_CEI_S = (norm_alv_prof * peso_alv) + 
-              (norm_pop_prof * peso_pop) + 
-              (norm_pob_prof * peso_pob)
-    ) %>%
-  arrange(desc(i_CEI_S)) %>%
-  mutate(Posicao_PCA = row_number())
-
-```
-
-```{r indice_final_2, warning=FALSE, message=FALSE}
-
-dadosBH_indice_simples <- dadosBH_indicadores_saude %>%
-  na.omit() %>%
-  mutate(
-    norm_alv_prof_2 = scales::rescale(ind_alv_prof, to = c(0, 1)),
-    norm_pop_prof_2 = scales::rescale(ind_pop_prof, to = c(0, 1)),
-    norm_pob_prof_2 = scales::rescale(ind_pob_prof, to = c(0, 1)),
-    i_CEI_S_bruto = (norm_alv_prof_2 + norm_pop_prof_2 + norm_pob_prof_2) / 3,
+    tx_coorte_geracional = (idoso_censo + crianca_censo) / populacao_censo,
+    tx_renda = populacao_renda_cadunico / populacao_censo,
+    tx_densidade = log10(populacao_censo),
+    uCode = str_replace_all(regional, " ", "_") 
   ) %>%
-  arrange(desc(i_CEI_S_bruto)) %>%
-  mutate(Posicao_Ranking = row_number())
+  select(uCode, tx_coorte_geracional, tx_renda, tx_densidade) %>%
+  replace(is.na(.), 0)
 
-```
+# Criar os Metadados do IPDRA:
 
-```{r graficos_saude_1, warning=FALSE, message=FALSE}
+meta_IPDRA <- data.frame(
+  Level = c(1, 1, 1, 2), 
+  iCode = c("tx_coorte_geracional", "tx_renda", "tx_densidade", "IPDRA"),
+  Type = c("Indicator", "Indicator", "Indicator", "Aggregate"),
+  Parent = c("IPDRA", "IPDRA", "IPDRA", NA),
+  Direction = c(1, 1, 1, 1),
+  Weight = c(1, 1, 1, 1) 
+)
 
-# Ajuste do banco de dados para as geomlines
+# Construir o objeto coin:
 
-mapa_pca_sf <- import("01. DADOS/regionais_bh.csv") %>%
-  clean_names() %>%
-  st_as_sf(wkt = "geometria", crs = 31983) %>% 
+coin_IPDRA <- new_coin(
+  iData = dados_IPDRA,
+  iMeta = meta_IPDRA,
+  level_names = c("Indicadores", "Indice")
+)
+
+# Identificar correlação de pearson:
+
+plot_corr(coin_IPDRA, 
+          dset = "Raw", 
+          iCodes = list("IPDRA"),
+          cor_type = "Pearson", 
+          text_color = "black")
+
+# Normalização (1 a 10) e Agregação:
+
+coin_IPDRA <- Normalise(
+  coin_IPDRA, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10)))
+)
+coin_IPDRA <- Aggregate(coin_IPDRA, dset = "Normalised", f_ag = "a_amean")
+
+# Extrair os resultados
+
+resultados_iPDA <- get_data(coin_IPDRA, dset = "Aggregated") %>% 
+  select(uCode, IPDRA)
+
+dadosBH_saude <- dadosBH_saude %>%
+  select(-any_of("IPDRA")) %>% 
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(resultados_iPDA, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# ==============================================================================
+# Passo 2: Índice de Provisão Territorial de Infraestrutura em Rede (IPTIR)
+# ==============================================================================
+
+# Preparar os dados brutos:
+
+dados_IPTIR <- dadosBH_saude %>%
   mutate(
-    regional = str_to_upper(nome),
-    regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")
+    tx_APS = n_centro_saude / populacao_censo,
+    tx_ESF = profissionais_esf / populacao_censo,
+    tx_NASF = profissionais_nasf / populacao_censo,
+    uCode = str_replace_all(regional, " ", "_")
   ) %>%
-  group_by(regional) %>%
-  summarize(geometria = st_union(geometria)) %>%
-  st_make_valid() %>%
-  left_join(dadosBH_pca_final, by = "regional")
+  select(uCode, tx_APS, tx_ESF, tx_NASF)
 
-# Ajuste dos geompoints
+# Criar os Metadados do IPTIR:
 
-dadosBH_centro_saude_geo <- dadosBH_centro_saude %>%
-  filter(!is.na(geometria), geometria != "", geometria != "NA") %>% 
-  st_as_sf(wkt = "geometria", crs = 31983) %>% 
-  filter(!st_is_empty(.))
+meta_IPTIR <- data.frame(
+  Level = c(1, 1, 1, 2), 
+  iCode = c("tx_APS", "tx_ESF", "tx_NASF", "IPTIR"),
+  Type = c("Indicator", "Indicator", "Indicator", "Aggregate"),
+  Parent = c("IPTIR", "IPTIR", "IPTIR", NA),
+  Direction = c(1, 1, 1, 1), 
+  Weight = c(1, 1, 1, 1) 
+)
 
-```
+# Construir o objeto coin para o IPTIR:
 
-```{r graficos_saude_2, warning=FALSE, message=FALSE}
+coin_IPTIR <- new_coin(
+  iData = dados_IPTIR,
+  iMeta = meta_IPTIR,
+  level_names = c("Indicadores", "Indice")
+)
 
-# Mapa
+# Identificar correlação de pearson:
 
-mapa_plot_saude <-ggplot() +
-  # Polígonos das regionais
-  geom_sf(data = mapa_pca_sf, aes(fill = i_CEI_S), color = "gray", linewidth = 0.6) +
-  # Pontos dos centros de saúde
-  geom_sf(data = dadosBH_centro_saude_geo, color = "black", size = 1.2) +
-  # Nomes das regionais
-  geom_sf_text(data = mapa_pca_sf, aes(label = regional), 
-               color = "black", size = 3, fontface = "bold", check_overlap = TRUE) +
-  coord_sf(datum = NA) +
-  scale_fill_gradient(
-    low = "#e5f5e0", 
-    high = "#06402b",
-    name = "i-CEIS",
-    na.value = "grey90"
-  ) +
-  theme_void() +
-  theme(
-    legend.position = "right",
-    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
-    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "black")
-  )
+plot_corr(coin_IPTIR, 
+          dset = "Raw", 
+          iCodes = list("IPTIR"),
+          cor_type = "Pearson", 
+          text_color = "black")
 
-# Salvar
+# Normalização e Agregação do IPTIR (Escala 1 a 10):
 
-ggsave(filename = "03. OUTPUTS/map_iceis.png", 
-       plot = mapa_plot_saude, 
-       width = 10, height = 8, dpi = 300, bg = "white")
+coin_IPTIR <- Normalise(
+  coin_IPTIR, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10))) 
+)
+coin_IPTIR <- Aggregate(coin_IPTIR, dset = "Normalised", f_ag = "a_amean")
 
-```
+# Extrair resultados do IPTIR e juntar ao banco:
 
-```{r graficos_saude_3, warning=FALSE, message=FALSE}
+resultados_IPTIR <- get_data(coin_IPTIR, dset = "Aggregated") %>% 
+  select(uCode, IPTIR)
 
-graf_plot_saude <- ggplot(dadosBH_pca_final, aes(x = i_CEI_S, y = reorder(regional, i_CEI_S))) +
-  geom_col(aes(fill = i_CEI_S), show.legend = FALSE) +
-  geom_text(aes(label = round(i_CEI_S, 2)), hjust = -0.2, size = 4, fontface = "bold") +
-  scale_fill_gradient(low = "#e5f5e0", high = "#06402b") +
-  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+dadosBH_saude <- dadosBH_saude %>%
+  select(-any_of(c("IPTIR", "iCEIS", "iCEIS_bruto"))) %>%
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(resultados_IPTIR, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# Parte 3: Índice de Capacidade e Estrutura Instalada de Saúde Final (iCEI-S)
+
+dadosBH_saude <- dadosBH_saude %>%
+  mutate(
+    IPDRA_invertido = 11 - IPDRA,
+    forca_bruta = IPTIR * IPDRA_invertido,
+    min_real = min(forca_bruta, na.rm = TRUE),
+    max_real = max(forca_bruta, na.rm = TRUE),
+    amplitude = max_real - min_real,
+    ancora_min = min_real - (amplitude * 0.25),
+    ancora_max = max_real + (amplitude * 0.25),
+    iCEIS = ((forca_bruta - ancora_min) / (ancora_max - ancora_min)) * 10
+  ) %>%
+select(-IPDRA_invertido, -forca_bruta, -min_real, -max_real, -amplitude, -ancora_min, -ancora_max)
+
+# Para evitar a compressão artificial dos resultados e o enviesamento provocado por mínimos e máximos empíricos (que engessariam as notas nos limites absolutos da escala), adotou-se a metodologia de Normalização por Âncoras Expandidas (Goalposts), semelhante à estruturação do IDH pelo PNUD. As fronteiras de normalização foram expandidas em 25% além da variância da amostra, permitindo que os escores finais reflitam a distância relativa genuína entre as regionais em um continuum numérico orgânico, afastando a irrealidade teórica de uma ausência absoluta (nota 0) ou de uma suficiência sistêmica inatingível (nota 10).
+
+# ==============================================================================
+# Análise de Componentes Principais (PCA)
+# ==============================================================================
+
+# Executar o PCA para a Pressão Demográfica (IPDRA):
+
+cat("\n--- Resultados do PCA: IPDRA ---\n")
+pca_IPDRA <- get_PCA(coin_IPDRA, 
+                     dset = "Normalised", 
+                     Level = 1,           
+                     out2 = "list")       
+
+# Exibe quanto da "pressão" total é explicada por um único fator:
+
+print(summary(pca_IPDRA$PCAres$IPDRA$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPDRA$PCAres$IPDRA$PCAres$rotation)
+
+
+# Executar o PCA para a Infraestrutura (IPTIR):
+
+cat("\n--- Resultados do PCA: IPTIR ---\n")
+pca_IPTIR <- get_PCA(coin_IPTIR, 
+                     dset = "Normalised", 
+                     Level = 1, 
+                     out2 = "list")
+
+# Exibe quanto da infraestrutura total é explicada:
+
+print(summary(pca_IPTIR$PCAres$IPTIR$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPTIR$PCAres$IPTIR$PCAres$rotation)
+
+# ==============================================================================
+# AUDITORIA E DESAGREGAÇÃO (METODOLOGIA OCDE)
+# ==============================================================================
+
+# Composição dos índices:
+
+# Gráfico IPTIR:
+
+plot_bar(coin_IPTIR, dset = "Aggregated", iCode = "IPTIR", stack_children = TRUE) +
+  labs(title = "(IPTIR)",
+       x = "Regional", y = "Nota do IPTIR") +
+  theme_minimal()
+
+# Gráfico IPDRA:
+
+plot_bar(coin_IPDRA, dset = "Aggregated", iCode = "IPDRA", stack_children = TRUE) +
+  labs(title = "(IPDRA)",
+       x = "Regional", y = "Nota do IPDRA") +
   theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Gráfico Integrado:
+
+grafico_integrado <- dadosBH_saude %>%
+  select(regional, IPDRA, IPTIR, iCEIS) %>%
+  pivot_longer(cols = c(IPDRA, IPTIR, iCEIS), 
+               names_to = "Indicador", 
+               values_to = "Nota") %>%
+  mutate(Indicador = factor(Indicador, levels = c("IPDRA", "IPTIR", "iCEIS"))) %>%
+  ggplot(aes(x = reorder(regional, -Nota), y = Nota, fill = Indicador)) +
+  geom_col(position = "dodge", color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = c("IPDRA" = "#ef4444", 
+                               "IPTIR" = "#3b82f6", 
+                               "iCEIS" = "#10b981")) +
+  labs(x = "Regional", 
+       fill = "Índice") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"))
+
+# Exibir o gráfico:
+
+print(grafico_integrado)
+
+# Auditoria de Pesos Efetivos (Importância vs Peso Nominal):
+
+efetivos_IPDRA <- get_eff_weights(coin_IPDRA, out2 = "df")
+efetivos_IPTIR <- get_eff_weights(coin_IPTIR, out2 = "df")
+
+cat("\n--- Ranking Geral das Regionais (Visão Integrada) ---\n")
+dadosBH_saude %>% 
+  select(regional, IPDRA, IPTIR, iCEIS) %>% 
+  arrange(desc(iCEIS)) %>% 
+  rmarkdown::paged_table()
+
+cat("\n--- Auditoria de Pesos: IPDRA ---\n")
+print(efetivos_IPDRA) 
+
+cat("\n--- Auditoria de Pesos: IPTIR ---\n")
+print(efetivos_IPTIR)
+
+
+# Exportar gráfico:
+
+ranking_S <- dadosBH_saude %>% 
+  select(regional, IPDRA, IPTIR, iCEIS) %>% 
+  arrange(desc(iCEIS))
+
+export(ranking_S, "03. OUTPUTS/ranking_regionais_S.xlsx")
+
+```
+
+
+```{r GRAFICO_2}
+
+# Construir o gráfico de barras:
+
+grafico_barras <- ggplot(dadosBH_saude, aes(x = iCEIS, y = reorder(regional, iCEIS), fill = iCEIS)) +
+  geom_col(linewidth = 0.3) +
+  scale_fill_gradient(low = "#e5f5e0", high = "#005a32") +
+  geom_text(aes(label = sprintf("%.2f", iCEIS)), 
+            hjust = -0.2,
+            size = 3.5, 
+            fontface = "bold", 
+            color = "black") +
+  scale_x_continuous(limits = c(0, 11), breaks = seq(0, 10, 2)) +
   labs(
-    x = "i-CEIS",
+    x = "ICEI-S",
     y = NULL
   ) +
+  theme_minimal() +
   theme(
-    plot.title = element_text(face = "bold", size = 14),
-    axis.text.y = element_text(face = "bold", size = 10),
-    panel.grid.major.y = element_blank()
+    plot.title = element_text(face = "bold", size = 16, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 20)),
+    axis.text.y = element_text(face = "bold", size = 11, color = "black"),
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position = "none"
   )
 
-# Salvar
+# Exibe o gráfico final:
 
-ggsave(filename = "03. OUTPUTS/graf_iceis.png", 
-       plot = graf_plot_saude, 
-       width = 8, height = 5, dpi = 300, bg = "white")
+print(grafico_barras)
+
+# Salvar o gráfico:
+
+ggsave(
+  filename = "03. OUTPUTS/ranking_barras_iceis_S.png", 
+  plot = grafico_barras,
+  width = 20,
+  height = 14,
+  units = "cm",
+  dpi = 300,
+  bg = "white"
+)
+
+
+```
+
+## Educação:
+
+### Data:
+
+```{r data_educação}
+
+# Criar banco de dados principal:
+
+ED_main <- dadosBH_saude %>% 
+  select(cod_regional,geometria, regional,area_domiciliada_total,area_km, quantidade_setores, domicilios, populacao_bhgeo, populacao_censo, densidade_demografica)
+
+# ==============================================================================
+# Tratamento de dados (IPDRA):
+# ==============================================================================
+
+# população em idade escolar:
+
+EDdados_censo <- dados_BH_2 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    crianca_0_14_censo = sum(demografia_V01031, demografia_V01032, demografia_V01033, na.rm = TRUE)
+  ) %>% 
+  mutate(regional = str_to_upper(regional))%>% 
+  select(regional, crianca_0_14_censo)
+
+# Join para compor banco principal:
+
+ED_main <- ED_main %>% 
+  left_join(EDdados_censo, by = "regional")
+
+# população em idade escolar vulnerável:
+
+Ed_dadosBH_cadunico_2022 <- import("01. DADOS/pop_cadunico_2022_clean.csv")
+
+Ed_dadosBH_cadunico_2022 <- Ed_dadosBH_cadunico_2022 %>%
+  filter(
+    idade <= 14
+  ) %>% 
+  count(regional) %>% 
+  filter(
+    regional != "ENDERECO NAO GEORREFERENCIADO",
+    regional != "Endereco FORA Region"
+  ) %>%
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
+  rename(
+    crianca_0_14_cadunico = "n"
+  )
+
+# Join para compor banco principal:
+
+ED_main <- ED_main %>% 
+  left_join(Ed_dadosBH_cadunico_2022, by = "regional")
+
+# ==============================================================================
+# Tratamento de dados (IPTIR):
+# ==============================================================================
+
+# microdados do censo escolar 2022:
+
+ED_dados_censo <- import("01. DADOS/microdados_ed_basica_2022.csv", encoding = "Latin-1")
+
+ED_dados_censo <- ED_dados_censo %>%
+  clean_names() %>% 
+  mutate(regional = str_to_upper(regional)) %>% 
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL"))
+
+# Coeficiente das creches conveniadas municipais e Escolas Municipais de Ensino Infantil com gestão municipal:
+
+ED_ensino_infantil <- import("01. DADOS/rede_municipal_educacao.csv") %>% 
+  clean_names() %>%
+  filter(
+    dependencia_adm %in% c("Creches Conveniadas", "EMEIS")
+  ) %>% 
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    ensino_infantil_equipamento = "n"
+  )
+
+ED_main <- ED_main %>% 
+  left_join(ED_ensino_infantil, by = "regional")
+
+# Coeficiente das Escolas Municipais de Ensino Fundamental e de Educação de Jovens e Adultos (EMEF) e Jovem Adulto parametrizado por escala populacional regional:
+
+ED_escolas_municipais <- import("01. DADOS/rede_municipal_educacao_escolas.csv") %>% 
+  clean_names() %>%
+  filter(
+    dependencia_adm == "Municipal"
+  ) %>% 
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    ensino_fundamental_equipamento = "n"
+  )
+
+ED_main <- ED_main %>% 
+  left_join(ED_escolas_municipais, by = "regional")
+
+# Coeficiente da força de trabalho dos docentes da educação infantil, fundamental parametrizado por escala da população em idade escolar regional:
+
+ED_docentes <- import("01. DADOS/educacao_docentes.xlsx") %>% 
+  clean_names() %>%
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    educacao_docentes = "n"
+  )
+
+ED_main <- ED_main %>% 
+  left_join(ED_docentes, by = "regional")
+
+# Coeficiente da força de trabalho dos profissionais das áreas de gestão e apoio pedagógico que atuam na educação infantil e fundamental parametrizado por escala da população em idade escolar regional:
+
+ED_profissionais <- import("01. DADOS/educacao_profissionais.xlsx") %>% 
+  clean_names() %>%
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    educacao_profissionais = "n"
+  )
+
+ED_main <- ED_main %>% 
+  left_join(ED_profissionais, by = "regional")
 
 ```
 
 
+### Indice Educação:
+
+```{r indice_ed, warning=FALSE, message=FALSE}
+
+# ==============================================================================
+# Passo 1 - Índice de Pressão Demográfica e Assistencial (IPDRA):
+# ==============================================================================
+
+ED_dados_IPDRA <- ED_main %>%
+  mutate(
+    tx_popescolar = crianca_0_14_censo / populacao_censo,
+    tx_vulnerabilidade = crianca_0_14_cadunico / populacao_censo,
+    uCode = str_replace_all(regional, " ", "_") 
+  ) %>%
+  select(uCode, tx_popescolar, tx_vulnerabilidade) %>% 
+  as.data.frame()
+
+# Criar os Metadados do IPDRA:
+
+ED_meta_IPDRA <- data.frame(
+  Level = c(1, 1, 2), 
+  iCode = c("tx_popescolar", "tx_vulnerabilidade", "ED-IPDRA"),
+  Type = c("Indicator", "Indicator", "Aggregate"),
+  Parent = c("ED-IPDRA", "ED-IPDRA", NA),
+  Direction = c(1, 1, 1),
+  Weight = c(1, 1, 1) 
+)
+
+# Construir o objeto coin:
+
+ED_coin_IPDRA <- new_coin(
+  iData = ED_dados_IPDRA,
+  iMeta = ED_meta_IPDRA,
+  level_names = c("Indicadores", "Indice")
+)
+
+# Identificar correlação de pearson:
+
+plot_corr(
+  ED_coin_IPDRA, 
+  dset = "Raw", 
+  Level = 1,
+  text_color = "black"
+)
+
+# Normalização (1 a 10) e Agregação:
+
+ED_coin_IPDRA <- Normalise(
+  ED_coin_IPDRA, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10)))
+)
+
+ED_coin_IPDRA <- Aggregate(
+  ED_coin_IPDRA, 
+  dset = "Normalised", 
+  f_ag = "a_amean"
+)
+
+# Extrair os resultados
+
+ED_resultados_IPDRA <- get_data(ED_coin_IPDRA, dset = "Aggregated") %>% 
+  select(uCode, `ED-IPDRA`)
+
+ED_main <- ED_main %>%
+  select(-any_of("ED-IPDRA")) %>% 
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(ED_resultados_IPDRA, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# ==============================================================================
+# Passo 2: Índice de Provisão Territorial de Infraestrutura em Rede (IPTIR)
+# ==============================================================================
+
+# Preparar os dados brutos:
+
+ED_dados_IPTIR <- ED_main %>%
+  mutate(
+    tx_einf = ensino_infantil_equipamento / populacao_censo,
+    tx_efun = ensino_fundamental_equipamento / populacao_censo,
+    tx_deif = educacao_docentes / populacao_censo,
+    tx_peif = educacao_profissionais / populacao_censo,
+    uCode = str_replace_all(regional, " ", "_")
+  ) %>%
+  select(uCode, tx_einf, tx_efun, tx_deif, tx_peif) %>% 
+  as.data.frame()
+
+# Criar os Metadados do IPTIR:
+
+ED_meta_IPTIR <- data.frame(
+  Level = c(1, 1, 1, 1, 2), 
+  iCode = c("tx_einf", "tx_efun", "tx_deif", "tx_peif", "ED-IPTIR"),
+  Type = c("Indicator", "Indicator", "Indicator", "Indicator", "Aggregate"),
+  Parent = c("ED-IPTIR", "ED-IPTIR", "ED-IPTIR", "ED-IPTIR", NA),
+  Direction = c(1, 1, 1, 1, 1), 
+  Weight = c(1, 1, 1, 1, 1) 
+)
+
+# Construir o objeto coin para o IPTIR:
+
+ED_coin_IPTIR <- new_coin(
+  iData = ED_dados_IPTIR,
+  iMeta = ED_meta_IPTIR,
+  level_names = c("Indicadores", "Indice")
+)
+
+# Identificar correlação de pearson:
+
+plot_corr(ED_coin_IPTIR, 
+          dset = "Raw", 
+          iCodes = list("ED-IPTIR"),
+          cor_type = "Pearson", 
+          text_color = "black")
+
+# Normalização e Agregação do IPTIR (Escala 1 a 10):
+
+ED_coin_IPTIR <- Normalise(
+  ED_coin_IPTIR, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10))) 
+)
+
+ED_coin_IPTIR <- Aggregate(
+  ED_coin_IPTIR, 
+  dset = "Normalised", 
+  f_ag = "a_amean"
+)
+
+# Extrair resultados do IPTIR e juntar ao banco:
+
+ED_resultados_IPTIR <- get_data(ED_coin_IPTIR, dset = "Aggregated") %>% 
+  select(uCode, `ED-IPTIR`)
+
+ED_main <- ED_main %>%
+  select(-any_of(c("ED-IPTIR", "ICEIED", "iCEIED_bruto"))) %>%
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(ED_resultados_IPTIR, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# ==============================================================================
+# Passo 3: Índice de Capacidade e Estrutura Instalada de Saúde Final (iCEI-S)
+# ==============================================================================
+
+ED_main <- ED_main %>%
+  mutate(
+    IPDRA_invertido = 11 - `ED-IPDRA`, 
+    forca_bruta = `ED-IPTIR` * IPDRA_invertido,
+    min_real = min(forca_bruta, na.rm = TRUE),
+    max_real = max(forca_bruta, na.rm = TRUE),
+    amplitude = max_real - min_real,
+    ancora_min = min_real - (amplitude * 0.28),
+    ancora_max = max_real + (amplitude * 0.28),
+    ICEIED = ((forca_bruta - ancora_min) / (ancora_max - ancora_min)) * 10
+  ) %>%
+  select(-IPDRA_invertido, -forca_bruta, -min_real, -max_real, -amplitude, -ancora_min, -ancora_max)
+
+# Para evitar a compressão artificial dos resultados e o enviesamento provocado por mínimos e máximos empíricos (que engessariam as notas nos limites absolutos da escala), adotou-se a metodologia de Normalização por Âncoras Expandidas (Goalposts), semelhante à estruturação do IDH pelo PNUD. As fronteiras de normalização foram expandidas em 25% além da variância da amostra, permitindo que os escores finais reflitam a distância relativa genuína entre as regionais em um continuum numérico orgânico, afastando a irrealidade teórica de uma ausência absoluta (nota 0) ou de uma suficiência sistêmica inatingível (nota 10).
+
+# ==============================================================================
+# Análise de Componentes Principais (PCA)
+# ==============================================================================
+
+# Executar o PCA para a Pressão Demográfica (IPDRA):
+
+cat("\n--- Resultados do PCA: IPDRA ---\n")
+
+pca_IPDRA <- get_PCA(
+  ED_coin_IPDRA,
+  dset = "Normalised", 
+  Level = 1, 
+  by_groups = FALSE
+)        
+
+# Exibe quanto da "pressão" total é explicada por um único fator:
+
+print(summary(pca_IPDRA$PCAres[[1]]$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPDRA$PCAres[[1]]$PCAres$rotation)
 
 
+# Executar o PCA para a Infraestrutura (IPTIR):
+
+cat("\n--- Resultados do PCA: IPTIR ---\n")
+
+pca_IPTIR <- get_PCA(
+  ED_coin_IPTIR,
+  dset = "Normalised", 
+  Level = 1, 
+  by_groups = FALSE
+)
+
+# Exibe quanto da infraestrutura total é explicada:
+
+print(summary(pca_IPTIR$PCAres[[1]]$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPTIR$PCAres[[1]]$PCAres$rotation)
+
+# ==============================================================================
+# AUDITORIA E DESAGREGAÇÃO (METODOLOGIA OCDE)
+# ==============================================================================
+
+# Composição dos índices:
+
+# Gráfico IPTIR:
+
+plot_bar(ED_coin_IPTIR, dset = "Aggregated", iCode = "ED-IPTIR", stack_children = TRUE) +
+  labs(title = "Composição da Infraestrutura (IPTIR)",
+       x = "Regional", y = "Nota do IPTIR") +
+  theme_minimal()
+
+# Gráfico IPDRA:
+
+plot_bar(ED_coin_IPDRA, dset = "Aggregated", iCode = "ED-IPDRA", stack_children = TRUE) +
+  labs(title = "Composição da Pressão Demográfica (IPDRA)",
+       x = "Regional", y = "Nota do IPDRA") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Gráfico Integrado:
+
+grafico_integrado <- ED_main %>%
+  select(regional, IPDRA = `ED-IPDRA`, IPTIR = `ED-IPTIR`, ICEIED) %>%
+  pivot_longer(cols = c(IPDRA, IPTIR, ICEIED), 
+               names_to = "Indicador", 
+               values_to = "Nota") %>%
+  mutate(Indicador = factor(Indicador, levels = c("IPDRA", "IPTIR", "ICEIED"))) %>%
+  ggplot(aes(x = reorder(regional, -Nota), y = Nota, fill = Indicador)) +
+  geom_col(position = "dodge", color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = c("IPDRA" = "#ef4444", 
+                               "IPTIR" = "#3b82f6", 
+                               "ICEIED" = "#10b981")) +
+  labs(x = "Regional", 
+       fill = "Índice",
+       title = "Visão Integrada: Pressão vs Infraestrutura vs Índice Final") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"))
+
+# Exibir o gráfico:
+
+print(grafico_integrado)
+
+# Auditoria de Pesos Efetivos:
+
+efetivos_IPDRA <- get_eff_weights(ED_coin_IPDRA, out2 = "df")
+efetivos_IPTIR <- get_eff_weights(ED_coin_IPTIR, out2 = "df")
+
+grafico_rank_ED <- cat("\n--- Ranking Geral das Regionais (Visão Integrada) ---\n")
+ED_main %>% 
+  select(regional, IPDRA = `ED-IPDRA`, IPTIR = `ED-IPTIR`, ICEIED) %>% 
+  arrange(desc(ICEIED))
+
+print(grafico_rank_ED)
 
 
+cat("\n--- Auditoria de Pesos: IPDRA ---\n")
+print(efetivos_IPDRA) 
+
+cat("\n--- Auditoria de Pesos: IPTIR ---\n")
+print(efetivos_IPTIR)
+
+# Exportar gráfico:
+
+ranking_ED <- ED_main %>% 
+  select(regional, "ED-IPDRA", "ED-IPTIR", ICEIED) %>% 
+  arrange(desc(ICEIED))
+
+export(ranking_ED, "03. OUTPUTS/ranking_regionais_ED.xlsx")
+
+
+```
+
+```{r GRAFICO_2_ED}
+
+# Construir o gráfico de barras (Corrigido para AS_main e ICEIAS):
+
+grafico_barras_ED <- ggplot(ED_main, aes(x = ICEIED, y = reorder(regional, ICEIED), fill = ICEIED)) +
+  geom_col(linewidth = 0.3) +
+  scale_fill_gradient(low = "#dfe9f5", high = "#4169e1") +
+  geom_text(aes(label = sprintf("%.2f", ICEIED)), 
+            hjust = -0.2,
+            size = 3.5, 
+            fontface = "bold", 
+            color = "black") +
+  scale_x_continuous(limits = c(0, 11), breaks = seq(0, 10, 2)) +
+  labs(
+    x = "ICEI-ED",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 20)),
+    axis.text.y = element_text(face = "bold", size = 11, color = "black"),
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position = "none"
+  )
+
+# Exibe o gráfico final:
+
+print(grafico_barras_ED)
+
+# Salvar o gráfico:
+ggsave(
+  filename = "03. OUTPUTS/ranking_barras_iceied.png", 
+  plot = grafico_barras_ED,
+  width = 20,
+  height = 14,
+  units = "cm",
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
+### Dados Assistência Social:
+
+```{r data_assistencia_social}
+
+# Criar banco de dados principal:
+
+AS_main <- dadosBH_saude %>% 
+  select(cod_regional,geometria, regional,area_domiciliada_total,area_km, quantidade_setores, domicilios, populacao_bhgeo, populacao_censo, densidade_demografica)
+
+# ==============================================================================
+# Tratamento de dados (IPDRA):
+# ==============================================================================
+
+# Percentual de famílias monoparentais femininas por regional:
+
+ASdados_monoparentais <- dados_BH_2 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    monoparental_feminino = sum(parentesco_V01204, na.rm = TRUE)
+  ) %>% 
+  mutate(regional = str_to_upper(regional))%>% 
+  select(regional, monoparental_feminino)
+
+AS_main <- AS_main %>% 
+  left_join(ASdados_monoparentais, by = "regional")
+
+# Percentual de famílias chefiadas por mulheres pretas ou pardas por regional:
+
+ASdados_feminino_negras <- dados_BH_2 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    responsavel_feminino_negras = sum(raca_V01340, raca_V01344, na.rm = TRUE)
+  ) %>% 
+  mutate(regional = str_to_upper(regional))%>% 
+  select(regional, responsavel_feminino_negras)
+
+AS_main <- AS_main %>% 
+  left_join(ASdados_feminino_negras, by = "regional")
+
+# Percentual de famílias numerosas (cinco ou mais moradores) por regional:
+
+ASdados_familias_numerosas <- dados_BH_5 %>%
+  group_by(regional = name_subdistrict) %>%
+  summarise(
+    quantidade_setores = n(), 
+    familias_numerosas = sum(domicilio01_V00022, domicilio01_V00022, domicilio01_V00023, domicilio01_V00024, domicilio01_V00025, domicilio01_V00026, na.rm = TRUE)
+  ) %>% 
+  mutate(regional = str_to_upper(regional))%>% 
+  select(regional, familias_numerosas)
+
+AS_main <- AS_main %>% 
+  left_join(ASdados_familias_numerosas, by = "regional")
+
+# Percentual de pessoas em situação de rua no Cadastro Único para Programas Sociais (CadÚnico) por regional:
+
+
+ASdados_cadunico_2022 <- import("01. DADOS/poprua_cadunico_2022.csv")
+
+ASdados_caudnico_psr <- ASdados_cadunico_2022 %>%
+  clean_names() %>% 
+  count(regional) %>% 
+  filter(
+    regional != "ENDERECO NAO GEORREFERENCIADO",
+    regional != "Endereco FORA Region"
+  ) %>%
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
+  rename(
+    psr_cadunico = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(ASdados_caudnico_psr, by = "regional")
+
+# Percentual de indivíduos inscritos no Cadastro Único para Programas Sociais (CadÚnico) por regional:
+
+AS_contador_caudnico_2022 <- dadosBH_cadunico_2022 %>% 
+  count(regional) %>% 
+  filter(
+    regional != "ENDERECO NAO GEORREFERENCIADO",
+    regional != "Endereco FORA Region"
+  ) %>%
+  mutate(regional = recode(regional, "CENTRO SUL" = "CENTRO-SUL")) %>% 
+  rename(
+    populacao_renda_cadunico = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_contador_caudnico_2022, by = "regional")
+
+# ==============================================================================
+# Tratamento de dados (IPTIR):
+# ==============================================================================
+
+# Coeficiente dos Centros de Referência da Assistência Social (CRAS) parametrizado por escala populacional:
+
+AS_equipamentos <- import("01. DADOS/rede_socioassistencial_equipamentos.csv") %>% 
+  clean_names()
+
+AS_equipamentos <- AS_equipamentos %>% 
+  rename(nome_bairro_popular = bairro) %>% 
+  left_join(dadosBH_bairro_regional, by = "nome_bairro_popular")
+
+AS_equipamentos_cras <- AS_equipamentos %>% 
+  filter(
+    sigla_categoria == "CRAS"
+  ) %>%
+  count(regional) %>% 
+  rename(
+    cras_equipamento = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_equipamentos_cras, by = "regional")
+
+# Lista do RH dos CRAS:
+
+AS_rh_cras <- import("01. DADOS/cras_rh_2022.xlsx") %>% 
+  clean_names() %>% 
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    cras_rh = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_rh_cras, by = "regional")
+
+# Coeficiente dos Centros de Referência Especializado da Assistência Social (CREAS) parametrizado por escala populacional regional:
+
+AS_equipamentos_creas <- AS_equipamentos %>% 
+  filter(
+    sigla_categoria == "CREAS"
+  ) %>%
+  count(regional) %>% 
+  rename(
+    creas_equipamento = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_equipamentos_creas, by = "regional")
+
+# Lista do RH dos CRAS:
+
+AS_rh_creas <- import("01. DADOS/creas_rh_2022.xlsx") %>% 
+  clean_names() %>% 
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    creas_rh = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_rh_creas, by = "regional")
+  
+# Coeficiente das Coordenações de Proteção Social e Cidadania (CPSC) parametrizado por escala populacional regional:
+
+AS_equipamentos_cpsc <- AS_equipamentos %>% 
+  filter(
+    sigla_categoria == "CREAS"
+  ) %>%
+  count(regional) %>% 
+  rename(
+    cpsc_equipamento = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_equipamentos_cpsc, by = "regional")
+
+# Lista do RH dos CRAS:
+
+AS_rh_cpsc <- import("01. DADOS/cps_rh_2022.xlsx") %>% 
+  clean_names() %>% 
+  mutate(regional = str_to_upper(regional)) %>%
+  mutate(regional = recode(regional, "CENTRO_SUL" = "CENTRO-SUL")) %>% 
+  count(regional) %>% 
+  rename(
+    cpsc_rh = "n"
+  )
+
+AS_main <- AS_main %>% 
+  left_join(AS_rh_cpsc, by = "regional")
+
+```
+
+### Índice assistência social:
+
+```{r indice_as, warning=FALSE, message=FALSE}
+
+# ==============================================================================
+# Passo 1 - Índice de Pressão Demográfica e Assistencial (IPDRA):
+# ==============================================================================
+
+AS_dados_IPDRA <- AS_main %>%
+  mutate(
+    tx_monoparental = monoparental_feminino / populacao_censo,
+    tx_chefiagenraca = responsavel_feminino_negras / populacao_censo,
+    tx_poprua = psr_cadunico / populacao_censo,
+    tx_vunerabilidade = populacao_renda_cadunico / populacao_censo,
+    tx_densidade = log10(populacao_censo),
+    uCode = str_replace_all(regional, " ", "_") 
+  ) %>%
+  select(uCode, tx_monoparental, tx_chefiagenraca, tx_poprua, tx_vunerabilidade, tx_densidade) %>% 
+  as.data.frame()
+
+# Criar os Metadados do IPDRA:
+
+AS_meta_IPDRA <- data.frame(
+  Level = c(1, 1, 1, 1, 1, 2), 
+  iCode = c("tx_monoparental", "tx_chefiagenraca", "tx_poprua", "tx_vunerabilidade", "tx_densidade", "AS-IPDRA"),
+  Type = c("Indicator", "Indicator", "Indicator", "Indicator", "Indicator", "Aggregate"),
+  Parent = c("AS-IPDRA", "AS-IPDRA", "AS-IPDRA", "AS-IPDRA", "AS-IPDRA", NA),
+  Direction = c(1, 1, 1, 1, 1, 1),
+  Weight = c(1, 1, 1, 1, 1, 1) 
+)
+
+# Construir o objeto coin:
+
+AS_coin_IPDRA <- new_coin(
+  iData = AS_dados_IPDRA,
+  iMeta = AS_meta_IPDRA,
+  level_names = c("Indicadores", "Indice")
+)
+
+# Identificar correlação de pearson:
+
+plot_corr(
+  AS_coin_IPDRA, 
+  dset = "Raw", 
+  Level = 1,
+  text_color = "black"
+)
+
+# Normalização (1 a 10) e Agregação:
+
+AS_coin_IPDRA <- Normalise(
+  AS_coin_IPDRA, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10)))
+)
+
+AS_coin_IPDRA <- Aggregate(
+  AS_coin_IPDRA, 
+  dset = "Normalised", 
+  f_ag = "a_amean"
+)
+
+# Extrair os resultados
+
+AS_resultados_iPDA <- get_data(AS_coin_IPDRA, dset = "Aggregated") %>% 
+  select(uCode, `AS-IPDRA`)
+
+AS_main <- AS_main %>%
+  select(-any_of("AS-IPDRA")) %>% 
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(AS_resultados_iPDA, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# ==============================================================================
+# Passo 2: Índice de Provisão Territorial de Infraestrutura em Rede (IPTIR)
+# ==============================================================================
+
+# Preparar os dados brutos:
+
+AS_dados_IPTIR <- AS_main %>%
+  mutate(
+    tx_psb = (cras_equipamento + cpsc_equipamento) / populacao_censo,
+    tx_pse = creas_equipamento / populacao_censo,
+    tx_trabsuas = (cras_rh + creas_rh + cpsc_rh) / populacao_censo,
+    uCode = str_replace_all(regional, " ", "_")
+  ) %>%
+  select(uCode, tx_psb, tx_pse, tx_trabsuas) %>% 
+  as.data.frame()
+
+# Criar os Metadados do IPTIR:
+
+AS_meta_IPTIR <- data.frame(
+  Level = c(1, 1, 1, 2), 
+  iCode = c("tx_psb", "tx_pse", "tx_trabsuas", "AS-IPTIR"),
+  Type = c("Indicator", "Indicator", "Indicator", "Aggregate"),
+  Parent = c("AS-IPTIR", "AS-IPTIR", "AS-IPTIR", NA),
+  Direction = c(1, 1, 1, 1), 
+  Weight = c(1, 1, 1, 1) 
+)
+
+# Construir o objeto coin para o IPTIR:
+
+AS_coin_IPTIR <- new_coin(
+  iData = AS_dados_IPTIR,
+  iMeta = AS_meta_IPTIR,
+  level_names = c("Indicadores", "Indice")
+)
+
+# Identificar correlação de pearson:
+
+plot_corr(AS_coin_IPTIR, 
+          dset = "Raw", 
+          iCodes = list("AS-IPTIR"),
+          cor_type = "Pearson", 
+          text_color = "black")
+
+# Normalização e Agregação do IPTIR (Escala 1 a 10):
+
+AS_coin_IPTIR <- Normalise(
+  AS_coin_IPTIR, 
+  dset = "Raw", 
+  global_specs = list(f_n = "n_minmax", f_n_para = list(l_u = c(1, 10))) 
+)
+
+AS_coin_IPTIR <- Aggregate(
+  AS_coin_IPTIR, 
+  dset = "Normalised", 
+  f_ag = "a_amean"
+)
+
+# Extrair resultados do IPTIR e juntar ao banco:
+
+resultados_IPTIR <- get_data(AS_coin_IPTIR, dset = "Aggregated") %>% 
+  select(uCode, `AS-IPTIR`)
+
+AS_main <- AS_main %>%
+  select(-any_of(c("AS-IPTIR", "iCEIS", "iCEIS_bruto"))) %>%
+  mutate(uCode_join = str_replace_all(regional, " ", "_")) %>%
+  left_join(resultados_IPTIR, by = c("uCode_join" = "uCode")) %>%
+  select(-uCode_join)
+
+# ==============================================================================
+# Passo 3: Índice de Capacidade e Estrutura Instalada de Saúde Final (iCEI-S)
+# ==============================================================================
+
+AS_main <- AS_main %>%
+  mutate(
+    IPDRA_invertido = 11 - `AS-IPDRA`, 
+    forca_bruta = `AS-IPTIR` * IPDRA_invertido,
+    min_real = min(forca_bruta, na.rm = TRUE),
+    max_real = max(forca_bruta, na.rm = TRUE),
+    amplitude = max_real - min_real,
+    ancora_min = min_real - (amplitude * 0.23),
+    ancora_max = max_real + (amplitude * 0.23),
+    ICEIAS = ((forca_bruta - ancora_min) / (ancora_max - ancora_min)) * 10
+  ) %>%
+  select(-IPDRA_invertido, -forca_bruta, -min_real, -max_real, -amplitude, -ancora_min, -ancora_max)
+
+# Para evitar a compressão artificial dos resultados e o enviesamento provocado por mínimos e máximos empíricos (que engessariam as notas nos limites absolutos da escala), adotou-se a metodologia de Normalização por Âncoras Expandidas (Goalposts), semelhante à estruturação do IDH pelo PNUD. As fronteiras de normalização foram expandidas em 25% além da variância da amostra, permitindo que os escores finais reflitam a distância relativa genuína entre as regionais em um continuum numérico orgânico, afastando a irrealidade teórica de uma ausência absoluta (nota 0) ou de uma suficiência sistêmica inatingível (nota 10).
+
+# ==============================================================================
+# Análise de Componentes Principais (PCA)
+# ==============================================================================
+
+# Executar o PCA para a Pressão Demográfica (IPDRA):
+
+cat("\n--- Resultados do PCA: IPDRA ---\n")
+
+pca_IPDRA <- get_PCA(
+  AS_coin_IPDRA,
+  dset = "Normalised", 
+  Level = 1, 
+  by_groups = FALSE
+)        
+
+# Exibe quanto da "pressão" total é explicada por um único fator:
+
+print(summary(pca_IPDRA$PCAres[[1]]$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPDRA$PCAres[[1]]$PCAres$rotation)
+
+
+# Executar o PCA para a Infraestrutura (IPTIR):
+
+cat("\n--- Resultados do PCA: IPTIR ---\n")
+
+pca_IPTIR <- get_PCA(
+  AS_coin_IPTIR,      # <-- Correção: Usa o objeto com prefixo AS_
+  dset = "Normalised", 
+  Level = 1, 
+  by_groups = FALSE
+)
+
+# Exibe quanto da infraestrutura total é explicada:
+
+print(summary(pca_IPTIR$PCAres[[1]]$PCAres))
+
+# Exibe os Pesos Naturais (Loadings):
+
+print(pca_IPTIR$PCAres[[1]]$PCAres$rotation)
+
+# ==============================================================================
+# AUDITORIA E DESAGREGAÇÃO (METODOLOGIA OCDE)
+# ==============================================================================
+
+# Composição dos índices:
+
+# Gráfico IPTIR:
+
+plot_bar(AS_coin_IPTIR, dset = "Aggregated", iCode = "AS-IPTIR", stack_children = TRUE) +
+  labs(title = "Composição da Infraestrutura (IPTIR)",
+       x = "Regional", y = "Nota do IPTIR") +
+  theme_minimal()
+
+# Gráfico IPDRA:
+
+plot_bar(AS_coin_IPDRA, dset = "Aggregated", iCode = "AS-IPDRA", stack_children = TRUE) +
+  labs(title = "Composição da Pressão Demográfica (IPDRA)",
+       x = "Regional", y = "Nota do IPDRA") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Gráfico Integrado:
+
+grafico_integrado <- AS_main %>%
+  select(regional, IPDRA = `AS-IPDRA`, IPTIR = `AS-IPTIR`, ICEIAS) %>%
+  pivot_longer(cols = c(IPDRA, IPTIR, ICEIAS), 
+               names_to = "Indicador", 
+               values_to = "Nota") %>%
+  mutate(Indicador = factor(Indicador, levels = c("IPDRA", "IPTIR", "ICEIAS"))) %>%
+  ggplot(aes(x = reorder(regional, -Nota), y = Nota, fill = Indicador)) +
+  geom_col(position = "dodge", color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = c("IPDRA" = "#ef4444", 
+                               "IPTIR" = "#3b82f6", 
+                               "ICEIAS" = "#10b981")) +
+  labs(x = "Regional", 
+       fill = "Índice",
+       title = "Visão Integrada: Pressão vs Infraestrutura vs Índice Final") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"))
+
+# Exibir o gráfico:
+
+print(grafico_integrado)
+
+# Auditoria de Pesos Efetivos:
+
+efetivos_IPDRA <- get_eff_weights(AS_coin_IPDRA, out2 = "df")
+efetivos_IPTIR <- get_eff_weights(AS_coin_IPTIR, out2 = "df")
+
+grafico_rank_AS <- cat("\n--- Ranking Geral das Regionais (Visão Integrada) ---\n")
+AS_main %>% 
+  select(regional, IPDRA = `AS-IPDRA`, IPTIR = `AS-IPTIR`, ICEIAS) %>% 
+  arrange(desc(ICEIAS))
+
+print(grafico_rank_AS)
+
+
+cat("\n--- Auditoria de Pesos: IPDRA ---\n")
+print(efetivos_IPDRA) 
+
+cat("\n--- Auditoria de Pesos: IPTIR ---\n")
+print(efetivos_IPTIR)
+
+ranking_AS <- AS_main %>% 
+  select(regional, "AS-IPDRA", "AS-IPTIR", ICEIAS) %>% 
+  arrange(desc(ICEIAS))
+
+export(ranking_AS, "03. OUTPUTS/ranking_regionais_AS.xlsx")
+
+
+```
+
+```{r GRAFICO_2_AS}
+
+# Construir o gráfico de barras (Corrigido para AS_main e ICEIAS):
+
+grafico_barras_AS <- ggplot(AS_main, aes(x = ICEIAS, y = reorder(regional, ICEIAS), fill = ICEIAS)) +
+  geom_col(linewidth = 0.3) +
+  scale_fill_gradient(low = "#fff9c4", high = "#FFED29") +
+  geom_text(aes(label = sprintf("%.2f", ICEIAS)), 
+            hjust = -0.2,
+            size = 3.5, 
+            fontface = "bold", 
+            color = "black") +
+  scale_x_continuous(limits = c(0, 11), breaks = seq(0, 10, 2)) +
+  labs(
+    x = "ICEI-AS",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 20)),
+    axis.text.y = element_text(face = "bold", size = 11, color = "black"),
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position = "none"
+  )
+
+# Exibe o gráfico final:
+
+print(grafico_barras_AS)
+
+# Salvar o gráfico:
+
+ggsave(
+  filename = "03. OUTPUTS/ranking_barras_iceias.png", 
+  plot = grafico_barras_AS,
+  width = 20,
+  height = 14,
+  units = "cm",
+  dpi = 300,
+  bg = "white"
+)
+
+```
